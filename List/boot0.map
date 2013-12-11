@@ -1,0 +1,52 @@
+RAM Allocation [bytes]
+Variable                                                          Address   Size
+--------------------------------------------------------------------------------
+rx_buffer0                                                        0x0200      64
+p_bank_addr                                                       0x0240       1
+checking_result                                                   0x0241       1
+command_rx_val                                                    0x0242       1
+preambula_bytes_rec                                               0x0243       1
+bytes_quantity_ans                                                0x0244       1
+Command_data                                                      0x0245      25
+preambula_bytes                                                   0x025E       1
+runApplication                                                    0x025F       1
+PageBuffer                                                        0x0260     128
+reset                                                             0x02E0       2
+tx_buffer0                                                        0x02E2      64
+tx_rd_index0                                                      0x0322       1
+tx_counter0                                                       0x0323       1
+
+EEPROM Allocation [bytes]
+Variable                                                          Address   Size
+--------------------------------------------------------------------------------
+Parameter_bank                                                    0x0000     138
+
+Register Allocation
+Variable                                                          Register  Size
+--------------------------------------------------------------------------------
+Pagedata                                                          R2,R3        2
+PageAddress                                                       R4,R5        2
+CurrentAddress                                                    R6,R7        2
+spmcrval                                                          R10          1
+rx_wr_index0                                                      R9           1
+rx_counter0                                                       R8           1
+sensor_address                                                    R11          1
+com_bytes_rx                                                      R13          1
+writePageSegmentsCounter                                          R12          1
+rx_buffer_overflow0                                               GPIOR0.0  1bit
+message_recieved                                                  GPIOR0.1  1bit
+answering                                                         GPIOR0.2  1bit
+burst_mode                                                        GPIOR0.3  1bit
+
+FLASH Allocation [words]
+Function                                                          Address   Size
+--------------------------------------------------------------------------------
+usart_rx_isr                                                      0x01C73     31
+usart_tx_isr                                                      0x01C92     33
+ext_int0_isr                                                      0x01CB3     27
+transmit_HART                                                     0x01CCE     30
+start_transmit                                                    0x01CEC    183
+system_init                                                       0x01E77     31
+BootLoad                                                          0x01E96     59
+eraseApplicationSection                                           0x01ED1     28
+main                                                              0x01EED     46

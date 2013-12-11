@@ -1,0 +1,1928 @@
+;/*****************************************************
+;Project :
+;Version :
+;Date    : 12.03.2013
+;Author  :
+;Company :
+;Comments:
+;
+;
+;Chip type           : ATmega168
+;Program type        : Boot Loader - Size:1024words
+;Clock frequency     : 0,460000 MHz
+;Memory model        : Small
+;External RAM size   : 0
+;Data Stack size     : 256
+;*****************************************************/
+;
+;/*
+;***********Функционал Bootloaderа************************
+;1. Осуществление связи с ПК по протоколу HART-loader,
+;   реализация должна подразумевать корректную работу
+;   с ПО Конфигуратор ДВСТ-3.
+;2. Возможность записи информации (самопрограммирование)
+;   как во flash память устройства, так и в eeprom.
+;3. Проверка CRC загруженного кода для определения
+;   корректности записи.
+;*********************************************************
+;
+;***********Формат фрейма протокола обмена HART-loader****
+;Следует заметить, что протокол HART-loader является по сути тем же
+;протоколом HART. Поэтому отличия в части формирования фреймов,
+;проверки КС и управления коммуникационными данными практически
+;отсутствуют. Однако, ввиду того, что реализация полной версии
+;протокола для  Bootloadera проблематична и избыточна, создался
+;этот урезанный вариант HART-протокола. Единственным дополнением
+;в листе команд протокола является набор команд для
+;самопрограммирования контроллера. В свою очередь, подавляющая
+;часть "лишних" команд удалена из данной реализации.
+;**********************************************************
+;
+;***********команды протокола обмена HART-loader**********
+;00 - чтение идентификационной информации
+;06 - запись адреса устройства в HART-сети
+;0f - чтение серийного номера датчика
+;13 - запись серийного номера датчика
+;A9 - запись байта
+;AA - запись страницы, при этом страница заполненяется автоматически (если не получен сигнал завершения программирования  ...
+;   - старт программирования
+;АВ - конец программирования
+;   - КС, расчитанная внешним ПО, эту часть скорее всего упраздним, т.к. кс проверяется у нас на следующем этапе - загруз ...
+;*********************************************************
+;*/
+;//#include <mega168.h>
+;
+;#include <delay.h>
+;#include <data_arrays.h>
+;PCODE: $00000000 VOL: 0
+	#ifndef __SLEEP_DEFINED__
+;PCODE: $00000001 VOL: 0
+	#define __SLEEP_DEFINED__
+;PCODE: $00000002 VOL: 0
+	.EQU __se_bit=0x01
+;PCODE: $00000003 VOL: 0
+	.EQU __sm_mask=0x0E
+;PCODE: $00000004 VOL: 0
+	.EQU __sm_adc_noise_red=0x02
+;PCODE: $00000005 VOL: 0
+	.EQU __sm_powerdown=0x04
+;PCODE: $00000006 VOL: 0
+	.EQU __sm_powersave=0x06
+;PCODE: $00000007 VOL: 0
+	.EQU __sm_standby=0x0C
+;PCODE: $00000008 VOL: 0
+	.EQU __sm_ext_standby=0x0E
+;PCODE: $00000009 VOL: 0
+	.SET power_ctrl_reg=smcr
+;PCODE: $0000000A VOL: 0
+	#endif
+;PCODE: $0000000B VOL: 0
+;PCODE: $0000000C VOL: 0
+;//#include <mega328p_bits.h>
+;#define  PageByte 	 128     // 64 Bytes
+;#define  AddressLshift    6
+;#asm(".EQU SpmcrAddr=0x57")
+;PCODE: $0000000D VOL: 0
+	.EQU SpmcrAddr=0x57
+;PCODE: $0000000E VOL: 0
+;#define IVCE 0
+;#define RXB8 1
+;#define TXB8 0
+;#define WDCE 4
+;#define WDE 3
+;#define WDP2 2
+;#define WDP1 1
+;#define WDP0 0
+;//#define UPE 2
+;//#define OVR 3
+;//#define FE 4
+;#define UDRE 5
+;#define RXC 7
+;//#define FRAMING_ERROR (1<<FE)
+;//#define PARITY_ERROR (1<<UPE)
+;//#define DATA_OVERRUN (1<<OVR)
+;//#define DATA_REGISTER_EMPTY (1<<UDRE)
+;#define RX_COMPLETE (1<<RXC)
+;#define RxEn UCSR0B=(UCSR0B&0xc0)|0x10
+;#define TxEn UCSR0B=(UCSR0B&0xc0)|0x08
+;#define Transmit PORTD.3=0//=PORTD&0xf7
+;#define Recieve PORTD.3=1//PORTD|0x08
+;#define wait_startOCD EICRA=0x03
+;#define wait_stopOCD EICRA=0x00
+;#define disable_uart UCSR0B=0xc0
+;#define disable_eints {EIMSK=0x00;EIFR=0x00;}
+;#define enable_eints {EIMSK=0x01;EIFR=0x01;}
+;//#define enable_led PORTD=PORTD|0x40
+;//#define disable_led PORTD=PORTD&0xbf
+;#define start_wait_Rx_timer {TIMSK0=0x01;TCCR0A=0x00;TCCR0B=0x04;TCNT0=0xA0;}
+;#define stop_wait_Rx_timer {TIMSK0=0x00;TCCR0A=0x00;TCCR0B=0x00;TCNT0=0x00;}
+;//#define setlevel_0_10 {PORTD.7=0;PORTD.6=0;}
+;//#define setlevel_0_20 {PORTD.7=0;PORTD.6=1;}
+;//#define setlevel_0_30 {PORTD.7=1;PORTD.6=0;}
+;//#define setlevel_0_50 {PORTD.7=1;PORTD.6=1;}
+;// USART Receiver buffer
+;register unsigned int Pagedata @2; //program data to be written from this and read back for checking
+;register unsigned int PageAddress @4; //address of the page
+;register unsigned int CurrentAddress @6; //address of the current data -  PageAddress + loop counter
+;//register char inchar @8; //data received from RS232
+;register char spmcrval @10; //value to write to SPM control register
+;//register unsigned int i @11;   //loop counter
+;//register unsigned int j @13;  //loop counter
+;#define RX_BUFFER_SIZE0 64
+;unsigned char rx_wr_index0,rx_counter0;
+;char rx_buffer0[RX_BUFFER_SIZE0];
+;//char com_data_rx[25];
+;char sensor_address=0x02,com_bytes_rx=0,writePageSegmentsCounter=0,p_bank_addr=0,checking_result=0,command_rx_val=0, pre ...
+;
+;bit rx_buffer_overflow0,message_recieved=0,answering=0,burst_mode=0;
+;volatile char runApplication = 0x00;
+;//unsigned int ubbr;
+;//unsigned int Checkdata ; //compared with Pagedata for checking
+;char PageBuffer[PageByte]; //buffer for data to be written
+;eeprom char tmpval[256];
+;void transmit_HART(void);
+;//int writePageToFlash(void);
+;int check_recieved_message();
+;int generate_command_data_array_answer(char command_recieved);
+;//void update_eeprom_parameters(char update_flag);
+;void start_transmit(int transmit_param);
+;void clear_buffer();
+;void BootLoad(void);
+;void eraseApplicationSection();
+;void (*voidFuncPtr)(void);
+;void (*APPLICATION)(void)=0x0000;
+;typedef void (*fptr_t)(void);
+;volatile fptr_t reset = (fptr_t)0x0000;
+;//void spmMacro(char val);
+;// Declare your global variables here
+;interrupt [USART_RXC] void usart_rx_isr(void)//прием по USART
+; 0000 0084 {
+
+	.CSEG
+;PCODE: $0000000F VOL: 0
+;PCODE: $00000010 VOL: 0
+; 0000 0085 
+; 0000 0086 char data;
+; 0000 0087 #asm("cli")
+;PCODE: $00000011 VOL: 0
+;	data -> R17
+;PCODE: $00000012 VOL: 0
+	cli
+;PCODE: $00000013 VOL: 0
+; 0000 0088 //status=UCSR0A;
+; 0000 0089 
+; 0000 008A data=UDR0;
+;PCODE: $00000014 VOL: 0
+;PCODE: $00000015 VOL: 0
+; 0000 008B //#asm("sei")
+; 0000 008C 
+; 0000 008D //if ((status & (FRAMING_ERROR | PARITY_ERROR | DATA_OVERRUN))==0)//если нет ошибок, то читаем данные в буфере USART
+; 0000 008E //   {
+; 0000 008F    rx_buffer0[rx_wr_index0]=data;
+;PCODE: $00000016 VOL: 0
+;PCODE: $00000017 VOL: 0
+;PCODE: $00000018 VOL: 0
+;PCODE: $00000019 VOL: 0
+; 0000 0090    if (++rx_wr_index0 == RX_BUFFER_SIZE0) rx_wr_index0=0;
+;PCODE: $0000001A VOL: 0
+;PCODE: $0000001B VOL: 0
+;PCODE: $0000001C VOL: 0
+;PCODE: $0000001D VOL: 0
+;PCODE: $0000001E VOL: 0
+; 0000 0091    if (++rx_counter0 == RX_BUFFER_SIZE0)
+;PCODE: $0000001F VOL: 0
+;PCODE: $00000020 VOL: 0
+;PCODE: $00000021 VOL: 0
+;PCODE: $00000022 VOL: 0
+;PCODE: $00000023 VOL: 0
+; 0000 0092       {
+; 0000 0093       rx_counter0=0;
+;PCODE: $00000024 VOL: 0
+; 0000 0094       rx_buffer_overflow0=1;
+;PCODE: $00000025 VOL: 0
+;PCODE: $00000026 VOL: 0
+; 0000 0095 
+; 0000 0096      };
+;PCODE: $00000027 VOL: 0
+; 0000 0097 //   };
+; 0000 0098  #asm("sei")
+;PCODE: $00000028 VOL: 0
+	sei
+;PCODE: $00000029 VOL: 0
+; 0000 0099 }
+;PCODE: $0000002A VOL: 0
+;PCODE: $0000002B VOL: 0
+;PCODE: $0000002C VOL: 0
+;PCODE: $0000002D VOL: 0
+;// USART Transmitter buffer
+;#define TX_BUFFER_SIZE0 64
+;char tx_buffer0[TX_BUFFER_SIZE0];
+;
+;unsigned char tx_rd_index0,tx_counter0;
+;
+;
+;// USART Transmitter interrupt service routine
+;interrupt [USART_TXC] void usart_tx_isr(void)//передача по USART соответственно
+; 0000 00A3 {
+;PCODE: $0000002E VOL: 0
+;PCODE: $0000002F VOL: 0
+; 0000 00A4 
+; 0000 00A5 
+; 0000 00A6 if (tx_counter0)
+;PCODE: $00000030 VOL: 0
+;PCODE: $00000031 VOL: 0
+;PCODE: $00000032 VOL: 0
+; 0000 00A7    {
+; 0000 00A8    --tx_counter0;
+;PCODE: $00000033 VOL: 0
+;PCODE: $00000034 VOL: 0
+;PCODE: $00000035 VOL: 0
+; 0000 00A9 
+; 0000 00AA    UDR0=tx_buffer0[tx_rd_index0];
+;PCODE: $00000036 VOL: 0
+;PCODE: $00000037 VOL: 0
+;PCODE: $00000038 VOL: 0
+;PCODE: $00000039 VOL: 0
+;PCODE: $0000003A VOL: 0
+; 0000 00AB 
+; 0000 00AC    if (++tx_rd_index0 == TX_BUFFER_SIZE0) tx_rd_index0=0;
+;PCODE: $0000003B VOL: 0
+;PCODE: $0000003C VOL: 0
+;PCODE: $0000003D VOL: 0
+;PCODE: $0000003E VOL: 0
+;PCODE: $0000003F VOL: 0
+;PCODE: $00000040 VOL: 0
+;PCODE: $00000041 VOL: 0
+; 0000 00AD    };
+;PCODE: $00000042 VOL: 0
+;PCODE: $00000043 VOL: 0
+; 0000 00AE 
+; 0000 00AF }
+;PCODE: $00000044 VOL: 0
+;PCODE: $00000045 VOL: 0
+;PCODE: $00000046 VOL: 0
+;// External Interrupt 0 service routine
+;interrupt [EXT_INT0] void ext_int0_isr(void)//первоначально прерывание работает по нарастающему уровню (set_rising_edge_ ...
+; 0000 00B2 //изменено, таймер, отсчитывающий задержку, сейчас не активен, пользуемся только OCD ногой модема
+; 0000 00B3 {
+;PCODE: $00000047 VOL: 0
+;PCODE: $00000048 VOL: 0
+; 0000 00B4 if(EICRA==0x03)                    //если сработало прерывание по верхнему уровню, то переключаемся на отлов нижнего уро ...
+;PCODE: $00000049 VOL: 0
+;PCODE: $0000004A VOL: 0
+;PCODE: $0000004B VOL: 0
+; 0000 00B5                 {
+; 0000 00B6                 Recieve;
+;PCODE: $0000004C VOL: 0
+;PCODE: $0000004D VOL: 0
+; 0000 00B7                 RxEn;
+;PCODE: $0000004E VOL: 0
+;PCODE: $0000004F VOL: 0
+;PCODE: $00000050 VOL: 0
+;PCODE: $00000051 VOL: 0
+; 0000 00B8                 //wait_stopOCD;
+; 0000 00B9                 //start_wait_Rx_timer;
+; 0000 00BA                 //disable_eints;
+; 0000 00BB                 wait_stopOCD;           //EICRA=0x00
+;PCODE: $00000052 VOL: 0
+;PCODE: $00000053 VOL: 0
+; 0000 00BC                 message_recieved=0;
+;PCODE: $00000054 VOL: 0
+;PCODE: $00000055 VOL: 0
+; 0000 00BD                 //mono_channel_mode;
+; 0000 00BE                 }
+; 0000 00BF else
+;PCODE: $00000056 VOL: 0
+;PCODE: $00000057 VOL: 0
+; 0000 00C0                 {
+; 0000 00C1                 //Transmit;
+; 0000 00C2 
+; 0000 00C3                 //stop_wait_Rx_timer;
+; 0000 00C4                 wait_startOCD;            //EICRA=0x03
+;PCODE: $00000058 VOL: 0
+;PCODE: $00000059 VOL: 0
+; 0000 00C5                 disable_uart;             //отключаем USART, переходим в режим приема
+;PCODE: $0000005A VOL: 0
+;PCODE: $0000005B VOL: 0
+; 0000 00C6                 message_recieved=1;
+;PCODE: $0000005C VOL: 0
+;PCODE: $0000005D VOL: 0
+; 0000 00C7 
+; 0000 00C8                 }
+;PCODE: $0000005E VOL: 0
+; 0000 00C9 //start_check_OCD_timer;//стартуем таймер отсчитывающий задержку 3.33 мс (4 цикла при минимальной частоте 1200Гц)
+; 0000 00CA 
+; 0000 00CB }
+;PCODE: $0000005F VOL: 0
+;PCODE: $00000060 VOL: 0
+;PCODE: $00000061 VOL: 0
+;
+;
+;
+;unsigned char USART_Receive( void )
+; 0000 00D0 {
+;PCODE: $00000062 VOL: 0
+;PCODE: $00000063 VOL: 0
+; 0000 00D1 /* Wait for data to be received */
+; 0000 00D2 while ( (UCSR0A&0x80)!=0 );
+;PCODE: $00000064 VOL: 0
+;PCODE: $00000065 VOL: 0
+;PCODE: $00000066 VOL: 0
+;PCODE: $00000067 VOL: 0
+;PCODE: $00000068 VOL: 0
+;PCODE: $00000069 VOL: 0
+; 0000 00D3 /* Get and return received data from buffer */
+; 0000 00D4 rx_counter0++;
+;PCODE: $0000006A VOL: 0
+; 0000 00D5 //Parameter_bank[1]=0x02;
+; 0000 00D6 return UDR0;
+;PCODE: $0000006B VOL: 0
+;PCODE: $0000006C VOL: 0
+; 0000 00D7 }
+;PCODE: $0000006D VOL: 0
+;void transmit_HART(void)//подпрограмма передачи в по HART
+; 0000 00D9 {
+;PCODE: $0000006E VOL: 0
+;PCODE: $0000006F VOL: 0
+; 0000 00DA int error_log;
+; 0000 00DB error_log=check_recieved_message();    //здесь проверяем корректность принятого сообщения и устанавливаем значение перем ...
+;PCODE: $00000070 VOL: 0
+;PCODE: $00000071 VOL: 0
+;	error_log -> R16,R17
+;PCODE: $00000072 VOL: 0
+;PCODE: $00000073 VOL: 0
+; 0000 00DC if(answering)                         //если нужен ответ
+;PCODE: $00000074 VOL: 0
+;PCODE: $00000075 VOL: 0
+;PCODE: $00000076 VOL: 0
+; 0000 00DD         {
+; 0000 00DE         if (!error_log)               //ошибок нет
+;PCODE: $00000077 VOL: 0
+;PCODE: $00000078 VOL: 0
+; 0000 00DF                 {
+; 0000 00E0                 error_log=error_log|(generate_command_data_array_answer(command_rx_val));//здесь обращаемся в генератор  ...
+;PCODE: $00000079 VOL: 0
+;PCODE: $0000007A VOL: 0
+;PCODE: $0000007B VOL: 0
+;PCODE: $0000007C VOL: 0
+; 0000 00E1                 start_transmit(error_log);
+;PCODE: $0000007D VOL: 0
+;PCODE: $0000007E VOL: 0
+; 0000 00E2                 }
+; 0000 00E3         else
+;PCODE: $0000007F VOL: 0
+;PCODE: $00000080 VOL: 0
+; 0000 00E4                 { //соответственно, если ошибки есть
+; 0000 00E5                 //PORTD=0x08;
+; 0000 00E6                 //Parameter_bank[4]=0x05;
+; 0000 00E7                 Recieve;
+;PCODE: $00000081 VOL: 0
+;PCODE: $00000082 VOL: 0
+; 0000 00E8 //                rx_buffer_overflow0=0;
+; 0000 00E9 //                checking_result=0;
+; 0000 00EA //                rx_wr_index0=0;
+; 0000 00EB                 message_recieved=0;
+;PCODE: $00000083 VOL: 0
+;PCODE: $00000084 VOL: 0
+; 0000 00EC                 start_transmit(error_log);
+;PCODE: $00000085 VOL: 0
+;PCODE: $00000086 VOL: 0
+; 0000 00ED                 }
+;PCODE: $00000087 VOL: 0
+; 0000 00EE         }
+; 0000 00EF else                              //ответ по HART не нужен
+;PCODE: $00000088 VOL: 0
+;PCODE: $00000089 VOL: 0
+; 0000 00F0         {
+; 0000 00F1 //        rx_buffer_overflow0=0;
+; 0000 00F2 //        checking_result=0;
+; 0000 00F3 //        rx_wr_index0=0;
+; 0000 00F4         RxEn;
+;PCODE: $0000008A VOL: 0
+;PCODE: $0000008B VOL: 0
+;PCODE: $0000008C VOL: 0
+;PCODE: $0000008D VOL: 0
+; 0000 00F5         Recieve;
+;PCODE: $0000008E VOL: 0
+;PCODE: $0000008F VOL: 0
+; 0000 00F6         }
+;PCODE: $00000090 VOL: 0
+; 0000 00F7     checking_result=0;                //сбрасываем "результат проверки"
+;PCODE: $00000091 VOL: 0
+;PCODE: $00000092 VOL: 0
+; 0000 00F8     rx_wr_index0=0;
+;PCODE: $00000093 VOL: 0
+; 0000 00F9     rx_buffer_overflow0=0;
+;PCODE: $00000094 VOL: 0
+;PCODE: $00000095 VOL: 0
+; 0000 00FA //clear_buffer();
+; 0000 00FB }
+;PCODE: $00000096 VOL: 0
+;PCODE: $00000097 VOL: 0
+;PCODE: $00000098 VOL: 0
+;
+;void start_transmit(int transmit_param)  // здесь происходит финализация отправки сообщения, к этому моменту входящее со ...
+; 0000 00FE {                                                          //
+;PCODE: $00000099 VOL: 0
+;PCODE: $0000009A VOL: 0
+; 0000 00FF char i=0,j=0;
+; 0000 0100 char check_sum_tx=0;
+; 0000 0101 while(UCSR0A<0x20){;}
+;PCODE: $0000009B VOL: 0
+;PCODE: $0000009C VOL: 0
+;	transmit_param -> Y+4
+;	i -> R17
+;	j -> R16
+;	check_sum_tx -> R19
+;PCODE: $0000009D VOL: 0
+;PCODE: $0000009E VOL: 0
+;PCODE: $0000009F VOL: 0
+;PCODE: $000000A0 VOL: 0
+;PCODE: $000000A1 VOL: 0
+;PCODE: $000000A2 VOL: 0
+;PCODE: $000000A3 VOL: 0
+;PCODE: $000000A4 VOL: 0
+;PCODE: $000000A5 VOL: 0
+;PCODE: $000000A6 VOL: 0
+;PCODE: $000000A7 VOL: 0
+;PCODE: $000000A8 VOL: 0
+; 0000 0102 
+; 0000 0103 //if(!RxTx){
+; 0000 0104 preambula_bytes=Parameter_bank[3];
+;PCODE: $000000A9 VOL: 0
+;PCODE: $000000AA VOL: 0
+;PCODE: $000000AB VOL: 0
+;PCODE: $000000AC VOL: 0
+; 0000 0105 delay_ms(25);
+;PCODE: $000000AD VOL: 0
+;PCODE: $000000AE VOL: 0
+;PCODE: $000000AF VOL: 0
+; 0000 0106 Transmit;
+;PCODE: $000000B0 VOL: 0
+;PCODE: $000000B1 VOL: 0
+; 0000 0107 TxEn;
+;PCODE: $000000B2 VOL: 0
+;PCODE: $000000B3 VOL: 0
+;PCODE: $000000B4 VOL: 0
+;PCODE: $000000B5 VOL: 0
+; 0000 0108 delay_ms(15);
+;PCODE: $000000B6 VOL: 0
+;PCODE: $000000B7 VOL: 0
+;PCODE: $000000B8 VOL: 0
+; 0000 0109 for (i=0;i<preambula_bytes;i++)
+;PCODE: $000000B9 VOL: 0
+;PCODE: $000000BA VOL: 0
+;PCODE: $000000BB VOL: 0
+;PCODE: $000000BC VOL: 0
+;PCODE: $000000BD VOL: 0
+;PCODE: $000000BE VOL: 0
+;PCODE: $000000BF VOL: 0
+;PCODE: $000000C0 VOL: 0
+;PCODE: $000000C1 VOL: 0
+; 0000 010A         {
+; 0000 010B         tx_buffer0[i]=0xff;
+;PCODE: $000000C2 VOL: 0
+;PCODE: $000000C3 VOL: 0
+;PCODE: $000000C4 VOL: 0
+;PCODE: $000000C5 VOL: 0
+;PCODE: $000000C6 VOL: 0
+; 0000 010C         tx_counter0++;
+;PCODE: $000000C7 VOL: 0
+;PCODE: $000000C8 VOL: 0
+;PCODE: $000000C9 VOL: 0
+; 0000 010D         }
+;PCODE: $000000CA VOL: 0
+;PCODE: $000000CB VOL: 0
+;PCODE: $000000CC VOL: 0
+;PCODE: $000000CD VOL: 0
+;PCODE: $000000CE VOL: 0
+; 0000 010E //i++;
+; 0000 010F if(burst_mode)tx_buffer0[i]=0x01;//стартовый байт
+;PCODE: $000000CF VOL: 0
+;PCODE: $000000D0 VOL: 0
+;PCODE: $000000D1 VOL: 0
+;PCODE: $000000D2 VOL: 0
+;PCODE: $000000D3 VOL: 0
+;PCODE: $000000D4 VOL: 0
+;PCODE: $000000D5 VOL: 0
+;PCODE: $000000D6 VOL: 0
+; 0000 0110 else tx_buffer0[i]=0x06;
+;PCODE: $000000D7 VOL: 0
+;PCODE: $000000D8 VOL: 0
+;PCODE: $000000D9 VOL: 0
+;PCODE: $000000DA VOL: 0
+;PCODE: $000000DB VOL: 0
+;PCODE: $000000DC VOL: 0
+;PCODE: $000000DD VOL: 0
+; 0000 0111 check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $000000DE VOL: 0
+;PCODE: $000000DF VOL: 0
+;PCODE: $000000E0 VOL: 0
+;PCODE: $000000E1 VOL: 0
+;PCODE: $000000E2 VOL: 0
+;PCODE: $000000E3 VOL: 0
+;PCODE: $000000E4 VOL: 0
+; 0000 0112 i++;
+;PCODE: $000000E5 VOL: 0
+;PCODE: $000000E6 VOL: 0
+; 0000 0113 tx_buffer0[i]=rx_buffer0[preambula_bytes_rec-preambula_bytes+i];//адрес
+;PCODE: $000000E7 VOL: 0
+;PCODE: $000000E8 VOL: 0
+;PCODE: $000000E9 VOL: 0
+;PCODE: $000000EA VOL: 0
+;PCODE: $000000EB VOL: 0
+;PCODE: $000000EC VOL: 0
+;PCODE: $000000ED VOL: 0
+;PCODE: $000000EE VOL: 0
+;PCODE: $000000EF VOL: 0
+;PCODE: $000000F0 VOL: 0
+;PCODE: $000000F1 VOL: 0
+;PCODE: $000000F2 VOL: 0
+;PCODE: $000000F3 VOL: 0
+;PCODE: $000000F4 VOL: 0
+;PCODE: $000000F5 VOL: 0
+;PCODE: $000000F6 VOL: 0
+; 0000 0114 check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $000000F7 VOL: 0
+;PCODE: $000000F8 VOL: 0
+;PCODE: $000000F9 VOL: 0
+;PCODE: $000000FA VOL: 0
+;PCODE: $000000FB VOL: 0
+;PCODE: $000000FC VOL: 0
+; 0000 0115 i++;
+;PCODE: $000000FD VOL: 0
+;PCODE: $000000FE VOL: 0
+; 0000 0116 tx_buffer0[i]=rx_buffer0[preambula_bytes_rec-preambula_bytes+i];//команда
+;PCODE: $000000FF VOL: 0
+;PCODE: $00000100 VOL: 0
+;PCODE: $00000101 VOL: 0
+;PCODE: $00000102 VOL: 0
+;PCODE: $00000103 VOL: 0
+;PCODE: $00000104 VOL: 0
+;PCODE: $00000105 VOL: 0
+;PCODE: $00000106 VOL: 0
+;PCODE: $00000107 VOL: 0
+;PCODE: $00000108 VOL: 0
+;PCODE: $00000109 VOL: 0
+;PCODE: $0000010A VOL: 0
+;PCODE: $0000010B VOL: 0
+;PCODE: $0000010C VOL: 0
+;PCODE: $0000010D VOL: 0
+;PCODE: $0000010E VOL: 0
+; 0000 0117 check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $0000010F VOL: 0
+;PCODE: $00000110 VOL: 0
+;PCODE: $00000111 VOL: 0
+;PCODE: $00000112 VOL: 0
+;PCODE: $00000113 VOL: 0
+;PCODE: $00000114 VOL: 0
+; 0000 0118 i++;
+;PCODE: $00000115 VOL: 0
+;PCODE: $00000116 VOL: 0
+; 0000 0119 if(!transmit_param)
+;PCODE: $00000117 VOL: 0
+;PCODE: $00000118 VOL: 0
+;PCODE: $00000119 VOL: 0
+; 0000 011A         {
+; 0000 011B         tx_buffer0[i]=bytes_quantity_ans+2;                                                  //число байт  //нужно созда ...
+;PCODE: $0000011A VOL: 0
+;PCODE: $0000011B VOL: 0
+;PCODE: $0000011C VOL: 0
+;PCODE: $0000011D VOL: 0
+;PCODE: $0000011E VOL: 0
+;PCODE: $0000011F VOL: 0
+; 0000 011C         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $00000120 VOL: 0
+;PCODE: $00000121 VOL: 0
+;PCODE: $00000122 VOL: 0
+;PCODE: $00000123 VOL: 0
+;PCODE: $00000124 VOL: 0
+;PCODE: $00000125 VOL: 0
+; 0000 011D         i++;
+;PCODE: $00000126 VOL: 0
+;PCODE: $00000127 VOL: 0
+; 0000 011E         tx_buffer0[i]=p_bank_addr;                                             //статус 1й байт
+;PCODE: $00000128 VOL: 0
+;PCODE: $00000129 VOL: 0
+;PCODE: $0000012A VOL: 0
+;PCODE: $0000012B VOL: 0
+;PCODE: $0000012C VOL: 0
+; 0000 011F         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $0000012D VOL: 0
+;PCODE: $0000012E VOL: 0
+;PCODE: $0000012F VOL: 0
+;PCODE: $00000130 VOL: 0
+;PCODE: $00000131 VOL: 0
+;PCODE: $00000132 VOL: 0
+; 0000 0120         i++;
+;PCODE: $00000133 VOL: 0
+;PCODE: $00000134 VOL: 0
+; 0000 0121         tx_buffer0[i]=0x00;                                             //статус 2й байт
+;PCODE: $00000135 VOL: 0
+;PCODE: $00000136 VOL: 0
+;PCODE: $00000137 VOL: 0
+;PCODE: $00000138 VOL: 0
+;PCODE: $00000139 VOL: 0
+; 0000 0122         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $0000013A VOL: 0
+;PCODE: $0000013B VOL: 0
+;PCODE: $0000013C VOL: 0
+;PCODE: $0000013D VOL: 0
+;PCODE: $0000013E VOL: 0
+;PCODE: $0000013F VOL: 0
+; 0000 0123         i++;
+;PCODE: $00000140 VOL: 0
+;PCODE: $00000141 VOL: 0
+; 0000 0124         for(j=0;j<bytes_quantity_ans;j++)
+;PCODE: $00000142 VOL: 0
+;PCODE: $00000143 VOL: 0
+;PCODE: $00000144 VOL: 0
+;PCODE: $00000145 VOL: 0
+;PCODE: $00000146 VOL: 0
+;PCODE: $00000147 VOL: 0
+;PCODE: $00000148 VOL: 0
+;PCODE: $00000149 VOL: 0
+;PCODE: $0000014A VOL: 0
+; 0000 0125                 {
+; 0000 0126                 tx_buffer0[i]=Command_data[j];                                                //данные //здесь нужно соз ...
+;PCODE: $0000014B VOL: 0
+;PCODE: $0000014C VOL: 0
+;PCODE: $0000014D VOL: 0
+;PCODE: $0000014E VOL: 0
+;PCODE: $0000014F VOL: 0
+;PCODE: $00000150 VOL: 0
+;PCODE: $00000151 VOL: 0
+;PCODE: $00000152 VOL: 0
+; 0000 0127                 check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $00000153 VOL: 0
+;PCODE: $00000154 VOL: 0
+;PCODE: $00000155 VOL: 0
+;PCODE: $00000156 VOL: 0
+;PCODE: $00000157 VOL: 0
+;PCODE: $00000158 VOL: 0
+; 0000 0128                 i++;
+;PCODE: $00000159 VOL: 0
+;PCODE: $0000015A VOL: 0
+; 0000 0129                 }
+;PCODE: $0000015B VOL: 0
+;PCODE: $0000015C VOL: 0
+;PCODE: $0000015D VOL: 0
+;PCODE: $0000015E VOL: 0
+;PCODE: $0000015F VOL: 0
+; 0000 012A         }
+; 0000 012B else {
+;PCODE: $00000160 VOL: 0
+;PCODE: $00000161 VOL: 0
+; 0000 012C         tx_buffer0[i]=com_bytes_rx+2;       //здесь просто берем количество байт из принятого сообщения                  ...
+;PCODE: $00000162 VOL: 0
+;PCODE: $00000163 VOL: 0
+;PCODE: $00000164 VOL: 0
+;PCODE: $00000165 VOL: 0
+;PCODE: $00000166 VOL: 0
+;PCODE: $00000167 VOL: 0
+; 0000 012D         //bytes_quantity_ans=rx_buffer0[preambula_bytes_rec-preambula_bytes+i]+2;  //эту величину все же нужно сохранить ...
+; 0000 012E         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $00000168 VOL: 0
+;PCODE: $00000169 VOL: 0
+;PCODE: $0000016A VOL: 0
+;PCODE: $0000016B VOL: 0
+;PCODE: $0000016C VOL: 0
+;PCODE: $0000016D VOL: 0
+; 0000 012F         i++;
+;PCODE: $0000016E VOL: 0
+;PCODE: $0000016F VOL: 0
+; 0000 0130         tx_buffer0[i]=transmit_param>>8;                                       //статус 1й байт
+;PCODE: $00000170 VOL: 0
+;PCODE: $00000171 VOL: 0
+;PCODE: $00000172 VOL: 0
+;PCODE: $00000173 VOL: 0
+;PCODE: $00000174 VOL: 0
+;PCODE: $00000175 VOL: 0
+; 0000 0131         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $00000176 VOL: 0
+;PCODE: $00000177 VOL: 0
+;PCODE: $00000178 VOL: 0
+;PCODE: $00000179 VOL: 0
+;PCODE: $0000017A VOL: 0
+;PCODE: $0000017B VOL: 0
+; 0000 0132         i++;
+;PCODE: $0000017C VOL: 0
+;PCODE: $0000017D VOL: 0
+; 0000 0133         tx_buffer0[i]=transmit_param;                                          //статус 2й байт
+;PCODE: $0000017E VOL: 0
+;PCODE: $0000017F VOL: 0
+;PCODE: $00000180 VOL: 0
+;PCODE: $00000181 VOL: 0
+;PCODE: $00000182 VOL: 0
+; 0000 0134         check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $00000183 VOL: 0
+;PCODE: $00000184 VOL: 0
+;PCODE: $00000185 VOL: 0
+;PCODE: $00000186 VOL: 0
+;PCODE: $00000187 VOL: 0
+;PCODE: $00000188 VOL: 0
+; 0000 0135         i++;
+;PCODE: $00000189 VOL: 0
+;PCODE: $0000018A VOL: 0
+; 0000 0136         j=i;
+;PCODE: $0000018B VOL: 0
+;PCODE: $0000018C VOL: 0
+; 0000 0137         for(i=j;i<com_bytes_rx+j;i++)
+;PCODE: $0000018D VOL: 0
+;PCODE: $0000018E VOL: 0
+;PCODE: $0000018F VOL: 0
+;PCODE: $00000190 VOL: 0
+;PCODE: $00000191 VOL: 0
+;PCODE: $00000192 VOL: 0
+;PCODE: $00000193 VOL: 0
+;PCODE: $00000194 VOL: 0
+;PCODE: $00000195 VOL: 0
+;PCODE: $00000196 VOL: 0
+;PCODE: $00000197 VOL: 0
+;PCODE: $00000198 VOL: 0
+;PCODE: $00000199 VOL: 0
+;PCODE: $0000019A VOL: 0
+;PCODE: $0000019B VOL: 0
+; 0000 0138                 {
+; 0000 0139                 tx_buffer0[i]=rx_buffer0[preambula_bytes_rec-preambula_bytes+i-2];                                       ...
+;PCODE: $0000019C VOL: 0
+;PCODE: $0000019D VOL: 0
+;PCODE: $0000019E VOL: 0
+;PCODE: $0000019F VOL: 0
+;PCODE: $000001A0 VOL: 0
+;PCODE: $000001A1 VOL: 0
+;PCODE: $000001A2 VOL: 0
+;PCODE: $000001A3 VOL: 0
+;PCODE: $000001A4 VOL: 0
+;PCODE: $000001A5 VOL: 0
+;PCODE: $000001A6 VOL: 0
+;PCODE: $000001A7 VOL: 0
+;PCODE: $000001A8 VOL: 0
+;PCODE: $000001A9 VOL: 0
+;PCODE: $000001AA VOL: 0
+;PCODE: $000001AB VOL: 0
+;PCODE: $000001AC VOL: 0
+; 0000 013A                 check_sum_tx=check_sum_tx^tx_buffer0[i];
+;PCODE: $000001AD VOL: 0
+;PCODE: $000001AE VOL: 0
+;PCODE: $000001AF VOL: 0
+;PCODE: $000001B0 VOL: 0
+;PCODE: $000001B1 VOL: 0
+;PCODE: $000001B2 VOL: 0
+; 0000 013B                 //i++;
+; 0000 013C                 }
+;PCODE: $000001B3 VOL: 0
+;PCODE: $000001B4 VOL: 0
+;PCODE: $000001B5 VOL: 0
+;PCODE: $000001B6 VOL: 0
+;PCODE: $000001B7 VOL: 0
+; 0000 013D         }
+;PCODE: $000001B8 VOL: 0
+; 0000 013E         //i++;
+; 0000 013F tx_buffer0[i]=check_sum_tx;
+;PCODE: $000001B9 VOL: 0
+;PCODE: $000001BA VOL: 0
+;PCODE: $000001BB VOL: 0
+;PCODE: $000001BC VOL: 0
+; 0000 0140 tx_rd_index0=1;
+;PCODE: $000001BD VOL: 0
+;PCODE: $000001BE VOL: 0
+; 0000 0141 //if(!transmit_param){
+; 0000 0142 //for(i=0;i<=rx_counter0;i++)tx_buffer0[i]=rx_buffer0[i]; }
+; 0000 0143 //tx_rd_index0=1;
+; 0000 0144 tx_counter0=i;
+;PCODE: $000001BF VOL: 0
+;PCODE: $000001C0 VOL: 0
+; 0000 0145 UDR0=tx_buffer0[0];
+;PCODE: $000001C1 VOL: 0
+;PCODE: $000001C2 VOL: 0
+; 0000 0146 //Parameter_bank[5]=0x06;
+; 0000 0147 while(tx_counter0){;}
+;PCODE: $000001C3 VOL: 0
+;PCODE: $000001C4 VOL: 0
+;PCODE: $000001C5 VOL: 0
+;PCODE: $000001C6 VOL: 0
+;PCODE: $000001C7 VOL: 0
+;PCODE: $000001C8 VOL: 0
+; 0000 0148 delay_ms(15);
+;PCODE: $000001C9 VOL: 0
+;PCODE: $000001CA VOL: 0
+;PCODE: $000001CB VOL: 0
+; 0000 0149 //RxEn;
+; 0000 014A Recieve;
+;PCODE: $000001CC VOL: 0
+;PCODE: $000001CD VOL: 0
+; 0000 014B message_recieved=0;
+;PCODE: $000001CE VOL: 0
+;PCODE: $000001CF VOL: 0
+; 0000 014C rx_counter0=0;
+;PCODE: $000001D0 VOL: 0
+; 0000 014D 
+; 0000 014E }
+;PCODE: $000001D1 VOL: 0
+;PCODE: $000001D2 VOL: 0
+;PCODE: $000001D3 VOL: 0
+;PCODE: $000001D4 VOL: 0
+;
+;
+;
+;int generate_command_data_array_answer(char command_recieved)//загружаем из эсппзу сохраненный массив параметров (Parame ...
+; 0000 0153 {
+;PCODE: $000001D5 VOL: 0
+;PCODE: $000001D6 VOL: 0
+; 0000 0154 char i=0,error=0,j=0;
+; 0000 0155 //char *dataPtr ;
+; 0000 0156 //*dataPtr = Parameter_bank[98];
+; 0000 0157 
+; 0000 0158 //runApplication=0x00;
+; 0000 0159 bytes_quantity_ans=1;
+;PCODE: $000001D7 VOL: 0
+;PCODE: $000001D8 VOL: 0
+;	command_recieved -> Y+4
+;	i -> R17
+;	error -> R16
+;	j -> R19
+;PCODE: $000001D9 VOL: 0
+;PCODE: $000001DA VOL: 0
+;PCODE: $000001DB VOL: 0
+;PCODE: $000001DC VOL: 0
+;PCODE: $000001DD VOL: 0
+;PCODE: $000001DE VOL: 0
+;PCODE: $000001DF VOL: 0
+;PCODE: $000001E0 VOL: 0
+; 0000 015A //if((command_recieved==0x00)|(command_recieved==0x06)|(command_recieved==0x16)|(command_recieved==0x19)|(command_reciev ...
+; 0000 015B if(command_recieved == 0x00)
+;PCODE: $000001E1 VOL: 0
+;PCODE: $000001E2 VOL: 0
+;PCODE: $000001E3 VOL: 0
+; 0000 015C {
+; 0000 015D 
+; 0000 015E     bytes_quantity_ans=12;
+;PCODE: $000001E4 VOL: 0
+;PCODE: $000001E5 VOL: 0
+; 0000 015F     //while(i<12)
+; 0000 0160     for(i=1;i<12;i++)
+;PCODE: $000001E6 VOL: 0
+;PCODE: $000001E7 VOL: 0
+;PCODE: $000001E8 VOL: 0
+;PCODE: $000001E9 VOL: 0
+;PCODE: $000001EA VOL: 0
+;PCODE: $000001EB VOL: 0
+;PCODE: $000001EC VOL: 0
+;PCODE: $000001ED VOL: 0
+;PCODE: $000001EE VOL: 0
+; 0000 0161     Command_data[i]=Parameter_bank[i];
+;PCODE: $000001EF VOL: 0
+;PCODE: $000001F0 VOL: 0
+;PCODE: $000001F1 VOL: 0
+;PCODE: $000001F2 VOL: 0
+;PCODE: $000001F3 VOL: 0
+;PCODE: $000001F4 VOL: 0
+;PCODE: $000001F5 VOL: 0
+;PCODE: $000001F6 VOL: 0
+;PCODE: $000001F7 VOL: 0
+;PCODE: $000001F8 VOL: 0
+;PCODE: $000001F9 VOL: 0
+;PCODE: $000001FA VOL: 0
+;PCODE: $000001FB VOL: 0
+;PCODE: $000001FC VOL: 0
+;PCODE: $000001FD VOL: 0
+; 0000 0163 }
+; 0000 0164 if(command_recieved==0x06)
+;PCODE: $000001FE VOL: 0
+;PCODE: $000001FF VOL: 0
+;PCODE: $00000200 VOL: 0
+;PCODE: $00000201 VOL: 0
+; 0000 0165 {
+; 0000 0166     // bytes_quantity_ans=1;
+; 0000 0167      sensor_address = rx_buffer0[preambula_bytes_rec+4];
+;PCODE: $00000202 VOL: 0
+;PCODE: $00000203 VOL: 0
+;PCODE: $00000204 VOL: 0
+;PCODE: $00000205 VOL: 0
+;PCODE: $00000206 VOL: 0
+; 0000 0168      Parameter_bank[25] = sensor_address;
+;PCODE: $00000207 VOL: 0
+;PCODE: $00000208 VOL: 0
+;PCODE: $00000209 VOL: 0
+;PCODE: $0000020A VOL: 0
+; 0000 0169      Command_data[0] =  sensor_address;
+;PCODE: $0000020B VOL: 0
+;PCODE: $0000020C VOL: 0
+; 0000 016A  //    error=0;
+; 0000 016B }
+; 0000 016C if(command_recieved==16)
+;PCODE: $0000020D VOL: 0
+;PCODE: $0000020E VOL: 0
+;PCODE: $0000020F VOL: 0
+;PCODE: $00000210 VOL: 0
+; 0000 016D {
+; 0000 016E     bytes_quantity_ans=3;
+;PCODE: $00000211 VOL: 0
+;PCODE: $00000212 VOL: 0
+; 0000 016F    for(i=0;i<3;i++)
+;PCODE: $00000213 VOL: 0
+;PCODE: $00000214 VOL: 0
+;PCODE: $00000215 VOL: 0
+;PCODE: $00000216 VOL: 0
+;PCODE: $00000217 VOL: 0
+;PCODE: $00000218 VOL: 0
+;PCODE: $00000219 VOL: 0
+;PCODE: $0000021A VOL: 0
+;PCODE: $0000021B VOL: 0
+; 0000 0170    Command_data[i] = Parameter_bank[98+i];
+;PCODE: $0000021C VOL: 0
+;PCODE: $0000021D VOL: 0
+;PCODE: $0000021E VOL: 0
+;PCODE: $0000021F VOL: 0
+;PCODE: $00000220 VOL: 0
+;PCODE: $00000221 VOL: 0
+;PCODE: $00000222 VOL: 0
+;PCODE: $00000223 VOL: 0
+;PCODE: $00000224 VOL: 0
+;PCODE: $00000225 VOL: 0
+;PCODE: $00000226 VOL: 0
+;PCODE: $00000227 VOL: 0
+;PCODE: $00000228 VOL: 0
+;PCODE: $00000229 VOL: 0
+;PCODE: $0000022A VOL: 0
+;PCODE: $0000022B VOL: 0
+;PCODE: $0000022C VOL: 0
+; 0000 0176 }
+; 0000 0177 if(command_recieved==19)
+;PCODE: $0000022D VOL: 0
+;PCODE: $0000022E VOL: 0
+;PCODE: $0000022F VOL: 0
+;PCODE: $00000230 VOL: 0
+; 0000 0178 {
+; 0000 0179     bytes_quantity_ans=3;
+;PCODE: $00000231 VOL: 0
+;PCODE: $00000232 VOL: 0
+; 0000 017A     for(i=0;i<3;i++)
+;PCODE: $00000233 VOL: 0
+;PCODE: $00000234 VOL: 0
+;PCODE: $00000235 VOL: 0
+;PCODE: $00000236 VOL: 0
+;PCODE: $00000237 VOL: 0
+;PCODE: $00000238 VOL: 0
+;PCODE: $00000239 VOL: 0
+;PCODE: $0000023A VOL: 0
+;PCODE: $0000023B VOL: 0
+; 0000 017B     Parameter_bank[98+i]=rx_buffer0[preambula_bytes_rec+4+i];
+;PCODE: $0000023C VOL: 0
+;PCODE: $0000023D VOL: 0
+;PCODE: $0000023E VOL: 0
+;PCODE: $0000023F VOL: 0
+;PCODE: $00000240 VOL: 0
+;PCODE: $00000241 VOL: 0
+;PCODE: $00000242 VOL: 0
+;PCODE: $00000243 VOL: 0
+;PCODE: $00000244 VOL: 0
+;PCODE: $00000245 VOL: 0
+;PCODE: $00000246 VOL: 0
+;PCODE: $00000247 VOL: 0
+;PCODE: $00000248 VOL: 0
+;PCODE: $00000249 VOL: 0
+;PCODE: $0000024A VOL: 0
+;PCODE: $0000024B VOL: 0
+;PCODE: $0000024C VOL: 0
+;PCODE: $0000024D VOL: 0
+;PCODE: $0000024E VOL: 0
+;PCODE: $0000024F VOL: 0
+;PCODE: $00000250 VOL: 0
+; 0000 017F }
+; 0000 0180 //if(command_recieved==42)
+; 0000 0181 //{
+; 0000 0182 //   //bytes_quantity_ans=0;
+; 0000 0183 //   //Command_data[0]=
+; 0000 0184 //   //if(rx_buffer0[]
+; 0000 0185 //   Command_data[0] =  0x0C;
+; 0000 0186 //}
+; 0000 0187 if(command_recieved>=0xaa)
+;PCODE: $00000251 VOL: 0
+;PCODE: $00000252 VOL: 0
+;PCODE: $00000253 VOL: 0
+;PCODE: $00000254 VOL: 0
+; 0000 0188 {
+; 0000 0189 
+; 0000 018A 
+; 0000 018B //    if(writePageSegmentsCounter<3)writePageSegmentsCounter++;
+; 0000 018C //    else writePageSegmentsCounter = 0;
+; 0000 018D     if(command_recieved==0xaa)
+;PCODE: $00000255 VOL: 0
+;PCODE: $00000256 VOL: 0
+;PCODE: $00000257 VOL: 0
+; 0000 018E     {
+; 0000 018F         for(i=writePageSegmentsCounter*32; i<(writePageSegmentsCounter+1)*32;i++,j++)
+;PCODE: $00000258 VOL: 0
+;PCODE: $00000259 VOL: 0
+;PCODE: $0000025A VOL: 0
+;PCODE: $0000025B VOL: 0
+;PCODE: $0000025C VOL: 0
+;PCODE: $0000025D VOL: 0
+;PCODE: $0000025E VOL: 0
+;PCODE: $0000025F VOL: 0
+;PCODE: $00000260 VOL: 0
+;PCODE: $00000261 VOL: 0
+;PCODE: $00000262 VOL: 0
+;PCODE: $00000263 VOL: 0
+;PCODE: $00000264 VOL: 0
+;PCODE: $00000265 VOL: 0
+;PCODE: $00000266 VOL: 0
+;PCODE: $00000267 VOL: 0
+;PCODE: $00000268 VOL: 0
+;PCODE: $00000269 VOL: 0
+;PCODE: $0000026A VOL: 0
+; 0000 0190             PageBuffer[i]=rx_buffer0[preambula_bytes_rec+4+j];
+;PCODE: $0000026B VOL: 0
+;PCODE: $0000026C VOL: 0
+;PCODE: $0000026D VOL: 0
+;PCODE: $0000026E VOL: 0
+;PCODE: $0000026F VOL: 0
+;PCODE: $00000270 VOL: 0
+;PCODE: $00000271 VOL: 0
+;PCODE: $00000272 VOL: 0
+;PCODE: $00000273 VOL: 0
+;PCODE: $00000274 VOL: 0
+;PCODE: $00000275 VOL: 0
+;PCODE: $00000276 VOL: 0
+;PCODE: $00000277 VOL: 0
+;PCODE: $00000278 VOL: 0
+;PCODE: $00000279 VOL: 0
+;PCODE: $0000027A VOL: 0
+;PCODE: $0000027B VOL: 0
+;PCODE: $0000027C VOL: 0
+;PCODE: $0000027D VOL: 0
+;PCODE: $0000027E VOL: 0
+;PCODE: $0000027F VOL: 0
+;PCODE: $00000280 VOL: 0
+; 0000 0191 if(writePageSegmentsCounter==3)
+;PCODE: $00000281 VOL: 0
+;PCODE: $00000282 VOL: 0
+;PCODE: $00000283 VOL: 0
+; 0000 0192         {
+; 0000 0193             #asm("cli")
+;PCODE: $00000284 VOL: 0
+	cli
+;PCODE: $00000285 VOL: 0
+; 0000 0194             BootLoad();
+;PCODE: $00000286 VOL: 0
+; 0000 0195             #asm("sei")
+;PCODE: $00000287 VOL: 0
+	sei
+;PCODE: $00000288 VOL: 0
+; 0000 0196             writePageSegmentsCounter=0;
+;PCODE: $00000289 VOL: 0
+; 0000 0197 
+; 0000 0198             //PageAddress+=128;
+; 0000 0199         }
+; 0000 019A         else writePageSegmentsCounter++;
+;PCODE: $0000028A VOL: 0
+;PCODE: $0000028B VOL: 0
+;PCODE: $0000028C VOL: 0
+; 0000 019B     }
+;PCODE: $0000028D VOL: 0
+; 0000 019C     else
+;PCODE: $0000028E VOL: 0
+;PCODE: $0000028F VOL: 0
+; 0000 019D     {
+; 0000 019E      runApplication=0x11;
+;PCODE: $00000290 VOL: 0
+;PCODE: $00000291 VOL: 1
+; 0000 019F      writePageSegmentsCounter=0;
+;PCODE: $00000292 VOL: 0
+; 0000 01A0 //    MCUCR = 0x01;
+; 0000 01A1 //    MCUCR = 0x00;
+; 0000 01A2 ////Parameter_bank[0]=0x11;
+; 0000 01A3 //    //delay_ms(100);
+; 0000 01A4 //    voidFuncPtr=(void(*)(void))0x00B8;   //адресс куда переходим
+; 0000 01A5 //    voidFuncPtr();
+; 0000 01A6 //    #asm("jmp 0x00B8");
+; 0000 01A7      }
+;PCODE: $00000293 VOL: 0
+; 0000 01A8     Command_data[0] =  0x0C;
+;PCODE: $00000294 VOL: 0
+;PCODE: $00000295 VOL: 0
+; 0000 01A9  //   error=0;
+; 0000 01AA 
+; 0000 01AB }
+; 0000 01AC //if(command_recieved==0xab)
+; 0000 01AD //{
+; 0000 01AE //    runApplication=0x11;
+; 0000 01AF //    Command_data[0] =  0x0C;
+; 0000 01B0 //     error=0;
+; 0000 01B1 //}
+; 0000 01B2 return error;
+;PCODE: $00000296 VOL: 0
+;PCODE: $00000297 VOL: 0
+;PCODE: $00000298 VOL: 0
+;PCODE: $00000299 VOL: 0
+;PCODE: $0000029A VOL: 0
+;PCODE: $0000029B VOL: 0
+; 0000 01B3 }
+;PCODE: $0000029C VOL: 0
+;
+;int check_recieved_message(){
+; 0000 01B5 int check_recieved_message(){
+;PCODE: $0000029D VOL: 0
+;PCODE: $0000029E VOL: 0
+; 0000 01B6 char i=0,j=0,k=0,tmp_i=0;//здесь i - счетчик всех байт j- счетчик байт преамбул
+; 0000 01B7 
+; 0000 01B8 int check_sum=0;
+; 0000 01B9 checking_result=0;
+;PCODE: $0000029F VOL: 0
+;	i -> R17
+;	j -> R16
+;	k -> R19
+;	tmp_i -> R18
+;	check_sum -> R20,R21
+;PCODE: $000002A0 VOL: 0
+;PCODE: $000002A1 VOL: 0
+;PCODE: $000002A2 VOL: 0
+;PCODE: $000002A3 VOL: 0
+;PCODE: $000002A4 VOL: 0
+;PCODE: $000002A5 VOL: 0
+;PCODE: $000002A6 VOL: 0
+;PCODE: $000002A7 VOL: 0
+;PCODE: $000002A8 VOL: 0
+;PCODE: $000002A9 VOL: 0
+;PCODE: $000002AA VOL: 0
+;PCODE: $000002AB VOL: 0
+; 0000 01BA answering=1;
+;PCODE: $000002AC VOL: 0
+;PCODE: $000002AD VOL: 0
+; 0000 01BB while ((rx_buffer0[j])==0xff)
+;PCODE: $000002AE VOL: 0
+;PCODE: $000002AF VOL: 0
+;PCODE: $000002B0 VOL: 0
+;PCODE: $000002B1 VOL: 0
+;PCODE: $000002B2 VOL: 0
+;PCODE: $000002B3 VOL: 0
+;PCODE: $000002B4 VOL: 0
+; 0000 01BC         {
+; 0000 01BD         if(8<j)
+;PCODE: $000002B5 VOL: 0
+;PCODE: $000002B6 VOL: 0
+;PCODE: $000002B7 VOL: 0
+; 0000 01BE                 {checking_result=0x90;//ошибка формирования фрейма, если количество преамбул больше либо равно количеств ...
+;PCODE: $000002B8 VOL: 0
+;PCODE: $000002B9 VOL: 0
+; 0000 01BF                  //rx_buffer0[i+1]=0x00;
+; 0000 01C0                  return checking_result;
+;PCODE: $000002BA VOL: 0
+;PCODE: $000002BB VOL: 0
+;PCODE: $000002BC VOL: 0
+;PCODE: $000002BD VOL: 0
+;PCODE: $000002BE VOL: 0
+; 0000 01C1                  }
+; 0000 01C2          j++;
+;PCODE: $000002BF VOL: 0
+;PCODE: $000002C0 VOL: 0
+;PCODE: $000002C1 VOL: 0
+; 0000 01C3         }
+;PCODE: $000002C2 VOL: 0
+;PCODE: $000002C3 VOL: 0
+; 0000 01C4         preambula_bytes_rec=j;
+;PCODE: $000002C4 VOL: 0
+;PCODE: $000002C5 VOL: 0
+; 0000 01C5         i=j;
+;PCODE: $000002C6 VOL: 0
+;PCODE: $000002C7 VOL: 0
+; 0000 01C6 if ((rx_buffer0[j])!=0x02)
+;PCODE: $000002C8 VOL: 0
+;PCODE: $000002C9 VOL: 0
+;PCODE: $000002CA VOL: 0
+;PCODE: $000002CB VOL: 0
+;PCODE: $000002CC VOL: 0
+;PCODE: $000002CD VOL: 0
+; 0000 01C7 //if ((rx_buffer0[i])!=0x02)
+; 0000 01C8         {
+; 0000 01C9         checking_result=0x02;
+;PCODE: $000002CE VOL: 0
+;PCODE: $000002CF VOL: 0
+; 0000 01CA         //return checking_result;
+; 0000 01CB         }//диагностируем ошибку команд "неверный выбор", если не от главного устройства
+; 0000 01CC //else    {
+; 0000 01CD         check_sum=check_sum^rx_buffer0[i];
+;PCODE: $000002D0 VOL: 0
+;PCODE: $000002D1 VOL: 0
+;PCODE: $000002D2 VOL: 0
+;PCODE: $000002D3 VOL: 0
+;PCODE: $000002D4 VOL: 0
+;PCODE: $000002D5 VOL: 0
+;PCODE: $000002D6 VOL: 0
+;PCODE: $000002D7 VOL: 0
+; 0000 01CE //        }
+; 0000 01CF i++;
+;PCODE: $000002D8 VOL: 0
+;PCODE: $000002D9 VOL: 0
+; 0000 01D0 if (((rx_buffer0[i])&0x30)!=0x00)
+;PCODE: $000002DA VOL: 0
+;PCODE: $000002DB VOL: 0
+;PCODE: $000002DC VOL: 0
+;PCODE: $000002DD VOL: 0
+;PCODE: $000002DE VOL: 0
+;PCODE: $000002DF VOL: 0
+; 0000 01D1         {checking_result=0x90;
+;PCODE: $000002E0 VOL: 0
+;PCODE: $000002E1 VOL: 0
+; 0000 01D2         //return checking_result;
+; 0000 01D3         }
+; 0000 01D4 //burst_mode=(rx_buffer0[i]&0x40)>>6;                          //burst_mode нужно вообще-то прописывать в команде
+; 0000 01D5 if((rx_buffer0[i]&0x0f)==Parameter_bank[25])answering=1;       //это проверка адреса, если адрес не тот, датчик молчит
+;PCODE: $000002E2 VOL: 0
+;PCODE: $000002E3 VOL: 0
+;PCODE: $000002E4 VOL: 0
+;PCODE: $000002E5 VOL: 0
+;PCODE: $000002E6 VOL: 0
+;PCODE: $000002E7 VOL: 0
+;PCODE: $000002E8 VOL: 0
+;PCODE: $000002E9 VOL: 0
+;PCODE: $000002EA VOL: 0
+;PCODE: $000002EB VOL: 0
+;PCODE: $000002EC VOL: 0
+;PCODE: $000002ED VOL: 0
+;PCODE: $000002EE VOL: 0
+;PCODE: $000002EF VOL: 0
+; 0000 01D6 else answering=0;
+;PCODE: $000002F0 VOL: 0
+;PCODE: $000002F1 VOL: 0
+;PCODE: $000002F2 VOL: 0
+;PCODE: $000002F3 VOL: 0
+; 0000 01D7 check_sum=check_sum^rx_buffer0[i];
+;PCODE: $000002F4 VOL: 0
+;PCODE: $000002F5 VOL: 0
+;PCODE: $000002F6 VOL: 0
+;PCODE: $000002F7 VOL: 0
+;PCODE: $000002F8 VOL: 0
+;PCODE: $000002F9 VOL: 0
+;PCODE: $000002FA VOL: 0
+;PCODE: $000002FB VOL: 0
+; 0000 01D8 i++;
+;PCODE: $000002FC VOL: 0
+;PCODE: $000002FD VOL: 0
+; 0000 01D9 command_rx_val=rx_buffer0[i];// здесь надо бы делать проверку команды: если она состоит в листе команд, то ошибку не выд ...
+;PCODE: $000002FE VOL: 0
+;PCODE: $000002FF VOL: 0
+;PCODE: $00000300 VOL: 0
+;PCODE: $00000301 VOL: 0
+;PCODE: $00000302 VOL: 0
+; 0000 01DA check_sum=check_sum^rx_buffer0[i];
+;PCODE: $00000303 VOL: 0
+;PCODE: $00000304 VOL: 0
+;PCODE: $00000305 VOL: 0
+;PCODE: $00000306 VOL: 0
+;PCODE: $00000307 VOL: 0
+;PCODE: $00000308 VOL: 0
+;PCODE: $00000309 VOL: 0
+; 0000 01DB i++;
+;PCODE: $0000030A VOL: 0
+;PCODE: $0000030B VOL: 0
+; 0000 01DC com_bytes_rx=rx_buffer0[i];                    //количество байт, зная их проверяем число байт данных и если оно не совп ...
+;PCODE: $0000030C VOL: 0
+;PCODE: $0000030D VOL: 0
+;PCODE: $0000030E VOL: 0
+;PCODE: $0000030F VOL: 0
+; 0000 01DD check_sum=check_sum^rx_buffer0[i];
+;PCODE: $00000310 VOL: 0
+;PCODE: $00000311 VOL: 0
+;PCODE: $00000312 VOL: 0
+;PCODE: $00000313 VOL: 0
+;PCODE: $00000314 VOL: 0
+;PCODE: $00000315 VOL: 0
+;PCODE: $00000316 VOL: 0
+; 0000 01DE i++;
+;PCODE: $00000317 VOL: 0
+;PCODE: $00000318 VOL: 0
+; 0000 01DF tmp_i=i;
+;PCODE: $00000319 VOL: 0
+;PCODE: $0000031A VOL: 0
+; 0000 01E0 j=tmp_i;
+;PCODE: $0000031B VOL: 0
+;PCODE: $0000031C VOL: 0
+; 0000 01E1 for (i=tmp_i;i<tmp_i+com_bytes_rx;i++)
+;PCODE: $0000031D VOL: 0
+;PCODE: $0000031E VOL: 0
+;PCODE: $0000031F VOL: 0
+;PCODE: $00000320 VOL: 0
+;PCODE: $00000321 VOL: 0
+;PCODE: $00000322 VOL: 0
+;PCODE: $00000323 VOL: 0
+;PCODE: $00000324 VOL: 0
+;PCODE: $00000325 VOL: 0
+;PCODE: $00000326 VOL: 0
+;PCODE: $00000327 VOL: 0
+;PCODE: $00000328 VOL: 0
+;PCODE: $00000329 VOL: 0
+;PCODE: $0000032A VOL: 0
+;PCODE: $0000032B VOL: 0
+; 0000 01E2        {
+; 0000 01E3        j++;
+;PCODE: $0000032C VOL: 0
+;PCODE: $0000032D VOL: 0
+; 0000 01E4        //com_data_rx[k]=rx_buffer0[i];
+; 0000 01E5        check_sum=check_sum^rx_buffer0[i];
+;PCODE: $0000032E VOL: 0
+;PCODE: $0000032F VOL: 0
+;PCODE: $00000330 VOL: 0
+;PCODE: $00000331 VOL: 0
+;PCODE: $00000332 VOL: 0
+;PCODE: $00000333 VOL: 0
+;PCODE: $00000334 VOL: 0
+; 0000 01E6        k++;
+;PCODE: $00000335 VOL: 0
+;PCODE: $00000336 VOL: 0
+; 0000 01E7        }
+;PCODE: $00000337 VOL: 0
+;PCODE: $00000338 VOL: 0
+;PCODE: $00000339 VOL: 0
+;PCODE: $0000033A VOL: 0
+;PCODE: $0000033B VOL: 0
+; 0000 01E8                 //j++;
+; 0000 01E9 //        if(com_bytes_rx!=0)i--;
+; 0000 01EA if (j!=i)
+;PCODE: $0000033C VOL: 0
+;PCODE: $0000033D VOL: 0
+;PCODE: $0000033E VOL: 0
+; 0000 01EB        {checking_result=0x90;
+;PCODE: $0000033F VOL: 0
+;PCODE: $00000340 VOL: 0
+; 0000 01EC        //return checking_result;
+; 0000 01ED        }
+; 0000 01EE //i++;
+; 0000 01EF if(rx_buffer0[i]!=check_sum)
+;PCODE: $00000341 VOL: 0
+;PCODE: $00000342 VOL: 0
+;PCODE: $00000343 VOL: 0
+;PCODE: $00000344 VOL: 0
+;PCODE: $00000345 VOL: 0
+;PCODE: $00000346 VOL: 0
+;PCODE: $00000347 VOL: 0
+;PCODE: $00000348 VOL: 0
+;PCODE: $00000349 VOL: 0
+; 0000 01F0         {
+; 0000 01F1         checking_result=0x88;
+;PCODE: $0000034A VOL: 0
+;PCODE: $0000034B VOL: 0
+; 0000 01F2         //return checking_result;
+; 0000 01F3         }
+; 0000 01F4 return checking_result;
+;PCODE: $0000034C VOL: 0
+;PCODE: $0000034D VOL: 0
+;PCODE: $0000034E VOL: 0
+;PCODE: $0000034F VOL: 0
+;PCODE: $00000350 VOL: 0
+;PCODE: $00000351 VOL: 0
+; 0000 01F5 }
+;PCODE: $00000352 VOL: 0
+;
+;void clear_buffer()
+; 0000 01F8 {
+;PCODE: $00000353 VOL: 0
+;PCODE: $00000354 VOL: 0
+; 0000 01F9 char i=0;
+; 0000 01FA for (i=0;i<RX_BUFFER_SIZE0;i++)
+;PCODE: $00000355 VOL: 0
+;	i -> R17
+;PCODE: $00000356 VOL: 0
+;PCODE: $00000357 VOL: 0
+;PCODE: $00000358 VOL: 0
+;PCODE: $00000359 VOL: 0
+;PCODE: $0000035A VOL: 0
+;PCODE: $0000035B VOL: 0
+;PCODE: $0000035C VOL: 0
+;PCODE: $0000035D VOL: 0
+;PCODE: $0000035E VOL: 0
+;PCODE: $0000035F VOL: 0
+;PCODE: $00000360 VOL: 0
+; 0000 01FB         {
+; 0000 01FC         rx_buffer0[i]=0;
+;PCODE: $00000361 VOL: 0
+;PCODE: $00000362 VOL: 0
+;PCODE: $00000363 VOL: 0
+;PCODE: $00000364 VOL: 0
+;PCODE: $00000365 VOL: 0
+; 0000 01FD         tx_buffer0[i]=0;
+;PCODE: $00000366 VOL: 0
+;PCODE: $00000367 VOL: 0
+;PCODE: $00000368 VOL: 0
+;PCODE: $00000369 VOL: 0
+;PCODE: $0000036A VOL: 0
+; 0000 01FE         }
+;PCODE: $0000036B VOL: 0
+;PCODE: $0000036C VOL: 0
+;PCODE: $0000036D VOL: 0
+;PCODE: $0000036E VOL: 0
+;PCODE: $0000036F VOL: 0
+; 0000 01FF for (i=0;i<25;i++)
+;PCODE: $00000370 VOL: 0
+;PCODE: $00000371 VOL: 0
+;PCODE: $00000372 VOL: 0
+;PCODE: $00000373 VOL: 0
+;PCODE: $00000374 VOL: 0
+;PCODE: $00000375 VOL: 0
+;PCODE: $00000376 VOL: 0
+;PCODE: $00000377 VOL: 0
+;PCODE: $00000378 VOL: 0
+; 0000 0200         {
+; 0000 0201 //        com_data_rx[i]=0;
+; 0000 0202         Command_data[i]=0;
+;PCODE: $00000379 VOL: 0
+;PCODE: $0000037A VOL: 0
+;PCODE: $0000037B VOL: 0
+;PCODE: $0000037C VOL: 0
+;PCODE: $0000037D VOL: 0
+; 0000 0203         }
+;PCODE: $0000037E VOL: 0
+;PCODE: $0000037F VOL: 0
+;PCODE: $00000380 VOL: 0
+;PCODE: $00000381 VOL: 0
+;PCODE: $00000382 VOL: 0
+; 0000 0204 }
+;PCODE: $00000383 VOL: 0
+;PCODE: $00000384 VOL: 0
+;PCODE: $00000385 VOL: 0
+;
+;void system_init(){
+; 0000 0206 void system_init(){
+;PCODE: $00000386 VOL: 0
+;PCODE: $00000387 VOL: 0
+; 0000 0207 //#asm("wdr")
+; 0000 0208 //WDTCSR=0x38;
+; 0000 0209 //WDTCSR=0x0E;
+; 0000 020A // Crystal Oscillator division factor: 1
+; 0000 020B /*#pragma optsize-
+; 0000 020C CLKPR=0x80;
+; 0000 020D CLKPR=0x00;
+; 0000 020E #ifdef _OPTIMIZE_SIZE_
+; 0000 020F #pragma optsize+
+; 0000 0210 #endif
+; 0000 0211   */
+; 0000 0212 // Input/Output Ports initialization
+; 0000 0213 // Port B initialization
+; 0000 0214 // Func7=In Func6=In Func5=Out Func4=In Func3=Out Func2=Out Func1=In Func0=In
+; 0000 0215 // State7=T State6=T State5=0 State4=T State3=0 State2=0 State1=T State0=T
+; 0000 0216 PORTB=0x00;
+;PCODE: $00000388 VOL: 0
+;PCODE: $00000389 VOL: 0
+; 0000 0217 DDRB=0x2c;
+;PCODE: $0000038A VOL: 0
+;PCODE: $0000038B VOL: 0
+; 0000 0218 
+; 0000 0219 // Port D initialization
+; 0000 021A // Func7=In Func6=In Func5=In Func4=In Func3=In Func2=In Func1=In Func0=In
+; 0000 021B // State7=T State6=T State5=T State4=T State3=T State2=T State1=T State0=T
+; 0000 021C //PORTD=0x00;
+; 0000 021D DDRD.3=1;
+;PCODE: $0000038C VOL: 0
+;PCODE: $0000038D VOL: 0
+; 0000 021E PORTD.3=1;
+;PCODE: $0000038E VOL: 0
+;PCODE: $0000038F VOL: 0
+; 0000 021F //DDRD.6=1;
+; 0000 0220 //DDRD.7=1;
+; 0000 0221 //PORTD.6=0;
+; 0000 0222 //PORTD.7=0;
+; 0000 0223 
+; 0000 0224 stop_wait_Rx_timer;
+;PCODE: $00000390 VOL: 0
+;PCODE: $00000391 VOL: 0
+;PCODE: $00000392 VOL: 0
+;PCODE: $00000393 VOL: 0
+;PCODE: $00000394 VOL: 0
+;PCODE: $00000395 VOL: 0
+;PCODE: $00000396 VOL: 0
+;PCODE: $00000397 VOL: 0
+; 0000 0225 /*USART predefinition: 1200 baud rate, tx enable, all interrutpts enabled 8bit buffer*/
+; 0000 0226 //UCSR0A=0x00;
+; 0000 0227 UCSR0B=0xc0;
+;PCODE: $00000398 VOL: 0
+;PCODE: $00000399 VOL: 0
+; 0000 0228 UCSR0C=0x06;
+;PCODE: $0000039A VOL: 0
+;PCODE: $0000039B VOL: 0
+; 0000 0229 //UBRR0H=0x00;
+; 0000 022A UBRR0L=0x17;
+;PCODE: $0000039C VOL: 0
+;PCODE: $0000039D VOL: 0
+; 0000 022B 
+; 0000 022C 
+; 0000 022D // External Interrupt(s) initialization
+; 0000 022E // INT0: On
+; 0000 022F // INT0 Mode: Any change
+; 0000 0230 // INT1: Off
+; 0000 0231 // Interrupt on any change on pins PCINT0-7: Off
+; 0000 0232 // Interrupt on any change on pins PCINT8-14: Off
+; 0000 0233 // Interrupt on any change on pins PCINT16-23: Off
+; 0000 0234 wait_startOCD;
+;PCODE: $0000039E VOL: 0
+;PCODE: $0000039F VOL: 0
+; 0000 0235 EIMSK=0x01;
+;PCODE: $000003A0 VOL: 0
+;PCODE: $000003A1 VOL: 0
+; 0000 0236 EIFR=0x01;
+;PCODE: $000003A2 VOL: 0
+;PCODE: $000003A3 VOL: 0
+; 0000 0237 //PCICR=0x00;
+; 0000 0238 MCUCR = 0x01;
+;PCODE: $000003A4 VOL: 0
+;PCODE: $000003A5 VOL: 0
+; 0000 0239 MCUCR = 0x03;
+;PCODE: $000003A6 VOL: 0
+;PCODE: $000003A7 VOL: 0
+; 0000 023A 
+; 0000 023B }
+;PCODE: $000003A8 VOL: 0
+;PCODE: $000003A9 VOL: 0
+;
+;void BootLoad(void)
+; 0000 023E {
+;PCODE: $000003AA VOL: 0
+;PCODE: $000003AB VOL: 0
+; 0000 023F     char i=0;
+; 0000 0240     for (i=0;i<PageByte;i+=2) //fill temporary buffer in 2 byte chunks from PageBuffer
+;PCODE: $000003AC VOL: 0
+;	i -> R17
+;PCODE: $000003AD VOL: 0
+;PCODE: $000003AE VOL: 0
+;PCODE: $000003AF VOL: 0
+;PCODE: $000003B0 VOL: 0
+;PCODE: $000003B1 VOL: 0
+;PCODE: $000003B2 VOL: 0
+;PCODE: $000003B3 VOL: 0
+;PCODE: $000003B4 VOL: 0
+;PCODE: $000003B5 VOL: 0
+;PCODE: $000003B6 VOL: 0
+;PCODE: $000003B7 VOL: 0
+; 0000 0241 
+; 0000 0242         {
+; 0000 0243         Pagedata=PageBuffer[i]+(PageBuffer[i+1]<<8);
+;PCODE: $000003B8 VOL: 0
+;PCODE: $000003B9 VOL: 0
+;PCODE: $000003BA VOL: 0
+;PCODE: $000003BB VOL: 0
+;PCODE: $000003BC VOL: 0
+;PCODE: $000003BD VOL: 0
+;PCODE: $000003BE VOL: 0
+;PCODE: $000003BF VOL: 0
+;PCODE: $000003C0 VOL: 0
+;PCODE: $000003C1 VOL: 0
+;PCODE: $000003C2 VOL: 0
+;PCODE: $000003C3 VOL: 0
+;PCODE: $000003C4 VOL: 0
+; 0000 0244         CurrentAddress=PageAddress+i;
+;PCODE: $000003C5 VOL: 0
+;PCODE: $000003C6 VOL: 0
+;PCODE: $000003C7 VOL: 0
+;PCODE: $000003C8 VOL: 0
+; 0000 0245 //        spmMacro(1);
+; 0000 0246         while (SPMCSR&1); //wait for spm complete
+;PCODE: $000003C9 VOL: 0
+;PCODE: $000003CA VOL: 0
+;PCODE: $000003CB VOL: 0
+;PCODE: $000003CC VOL: 0
+;PCODE: $000003CD VOL: 0
+;PCODE: $000003CE VOL: 0
+;PCODE: $000003CF VOL: 0
+; 0000 0247         spmcrval=1;
+;PCODE: $000003D0 VOL: 0
+;PCODE: $000003D1 VOL: 0
+; 0000 0248         #asm
+;PCODE: $000003D2 VOL: 0
+; 0000 0249         movw r30, r6    ;//move CurrentAddress to Z pointer
+        movw r30, r6    ;//move CurrentAddress to Z pointer
+;PCODE: $000003D3 VOL: 0
+; 0000 024A         mov r1, r3        ;//move Pagedata MSB reg 1
+        mov r1, r3        ;//move Pagedata MSB reg 1
+;PCODE: $000003D4 VOL: 0
+; 0000 024B         mov r0, r2        ;//move Pagedata LSB reg 1
+        mov r0, r2        ;//move Pagedata LSB reg 1
+;PCODE: $000003D5 VOL: 0
+; 0000 024C         sts SpmcrAddr, r10   ;//move spmcrval to SPM control register
+        sts SpmcrAddr, r10   ;//move spmcrval to SPM control register
+;PCODE: $000003D6 VOL: 0
+; 0000 024D         spm                ;//store program memory
+        spm                ;//store program memory
+;PCODE: $000003D7 VOL: 0
+;PCODE: $000003D8 VOL: 0
+; 0000 024E         #endasm
+; 0000 024F         }
+;PCODE: $000003D9 VOL: 0
+;PCODE: $000003DA VOL: 0
+;PCODE: $000003DB VOL: 0
+;PCODE: $000003DC VOL: 0
+;PCODE: $000003DD VOL: 0
+; 0000 0250 //         spmMacro(3);
+; 0000 0251 //         spmMacro(5);
+; 0000 0252     while (SPMCSR&1);  //wait for spm complete
+;PCODE: $000003DE VOL: 0
+;PCODE: $000003DF VOL: 0
+;PCODE: $000003E0 VOL: 0
+;PCODE: $000003E1 VOL: 0
+;PCODE: $000003E2 VOL: 0
+;PCODE: $000003E3 VOL: 0
+;PCODE: $000003E4 VOL: 0
+; 0000 0253     spmcrval=3;        //erase page
+;PCODE: $000003E5 VOL: 0
+;PCODE: $000003E6 VOL: 0
+; 0000 0254     #asm
+;PCODE: $000003E7 VOL: 0
+; 0000 0255     movw r30, r4       ;//move PageAddress to Z pointer
+    movw r30, r4       ;//move PageAddress to Z pointer
+;PCODE: $000003E8 VOL: 0
+; 0000 0256     sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+    sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+;PCODE: $000003E9 VOL: 0
+; 0000 0257     spm                 ;//erase page
+    spm                 ;//erase page
+;PCODE: $000003EA VOL: 0
+;PCODE: $000003EB VOL: 0
+; 0000 0258     #endasm
+; 0000 0259 
+; 0000 025A     while (SPMCSR&1); //wait for spm complete
+;PCODE: $000003EC VOL: 0
+;PCODE: $000003ED VOL: 0
+;PCODE: $000003EE VOL: 0
+;PCODE: $000003EF VOL: 0
+;PCODE: $000003F0 VOL: 0
+;PCODE: $000003F1 VOL: 0
+;PCODE: $000003F2 VOL: 0
+; 0000 025B     spmcrval=5;        //write page
+;PCODE: $000003F3 VOL: 0
+;PCODE: $000003F4 VOL: 0
+; 0000 025C     #asm
+;PCODE: $000003F5 VOL: 0
+; 0000 025D     movw r30, r4       ;//move PageAddress to Z pointer
+    movw r30, r4       ;//move PageAddress to Z pointer
+;PCODE: $000003F6 VOL: 0
+; 0000 025E     sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+    sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+;PCODE: $000003F7 VOL: 0
+; 0000 025F     spm                 ;//write page
+    spm                 ;//write page
+;PCODE: $000003F8 VOL: 0
+;PCODE: $000003F9 VOL: 0
+; 0000 0260     #endasm
+; 0000 0261     PageAddress +=128 ; //essentially the same as multiply by PageSize
+;PCODE: $000003FA VOL: 0
+;PCODE: $000003FB VOL: 0
+;PCODE: $000003FC VOL: 0
+; 0000 0262   }
+;PCODE: $000003FD VOL: 0
+;PCODE: $000003FE VOL: 0
+;PCODE: $000003FF VOL: 0
+;//void spmMacro(char val)
+;//{
+;//    while (SPMCSR&1); //wait for spm complete
+;//    spmcrval=val;        //if val = 5 - write page if val = 3 - erase page, if val = 1 save data to buffe
+;//    #asm
+;//    movw r30, r4       ;//move PageAddress to Z pointer
+;//    sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+;//    spm                 ;//write page
+;//    #endasm
+;//}
+;void eraseApplicationSection()
+; 0000 026E {
+;PCODE: $00000400 VOL: 0
+;PCODE: $00000401 VOL: 0
+; 0000 026F #asm("cli");
+;PCODE: $00000402 VOL: 0
+	cli
+;PCODE: $00000403 VOL: 0
+; 0000 0270 for(PageAddress=0; PageAddress<12288; PageAddress++)
+;PCODE: $00000404 VOL: 0
+;PCODE: $00000405 VOL: 0
+;PCODE: $00000406 VOL: 0
+;PCODE: $00000407 VOL: 0
+;PCODE: $00000408 VOL: 0
+;PCODE: $00000409 VOL: 0
+;PCODE: $0000040A VOL: 0
+;PCODE: $0000040B VOL: 0
+;PCODE: $0000040C VOL: 0
+; 0000 0271 {
+; 0000 0272     while (SPMCSR&1);  //wait for spm complete
+;PCODE: $0000040D VOL: 0
+;PCODE: $0000040E VOL: 0
+;PCODE: $0000040F VOL: 0
+;PCODE: $00000410 VOL: 0
+;PCODE: $00000411 VOL: 0
+;PCODE: $00000412 VOL: 0
+;PCODE: $00000413 VOL: 0
+; 0000 0273     spmcrval=3;        //erase page
+;PCODE: $00000414 VOL: 0
+;PCODE: $00000415 VOL: 0
+; 0000 0274     #asm
+;PCODE: $00000416 VOL: 0
+; 0000 0275     movw r30, r4       ;//move PageAddress to Z pointer
+    movw r30, r4       ;//move PageAddress to Z pointer
+;PCODE: $00000417 VOL: 0
+; 0000 0276     sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+    sts SpmcrAddr, r10    ;//move spmcrval to SPM control register
+;PCODE: $00000418 VOL: 0
+; 0000 0277     spm                 ;//erase page
+    spm                 ;//erase page
+;PCODE: $00000419 VOL: 0
+;PCODE: $0000041A VOL: 0
+; 0000 0278     #endasm
+; 0000 0279 }
+;PCODE: $0000041B VOL: 0
+;PCODE: $0000041C VOL: 0
+;PCODE: $0000041D VOL: 0
+;PCODE: $0000041E VOL: 0
+;PCODE: $0000041F VOL: 0
+;PCODE: $00000420 VOL: 0
+; 0000 027A PageAddress=0;
+;PCODE: $00000421 VOL: 0
+; 0000 027B runApplication=0x00;
+;PCODE: $00000422 VOL: 0
+;PCODE: $00000423 VOL: 1
+; 0000 027C #asm("sei");
+;PCODE: $00000424 VOL: 0
+	sei
+;PCODE: $00000425 VOL: 0
+; 0000 027D 
+; 0000 027E }
+;PCODE: $00000426 VOL: 0
+;PCODE: $00000427 VOL: 0
+;void executeLoadedCode(void)
+; 0000 0280 {
+;PCODE: $00000428 VOL: 0
+;PCODE: $00000429 VOL: 0
+; 0000 0281 #asm("sei");
+;PCODE: $0000042A VOL: 0
+	sei
+;PCODE: $0000042B VOL: 0
+; 0000 0282 system_init();
+;PCODE: $0000042C VOL: 0
+; 0000 0283 RxEn;
+;PCODE: $0000042D VOL: 0
+;PCODE: $0000042E VOL: 0
+;PCODE: $0000042F VOL: 0
+;PCODE: $00000430 VOL: 0
+; 0000 0284 Recieve;
+;PCODE: $00000431 VOL: 0
+;PCODE: $00000432 VOL: 0
+; 0000 0285 //#asm("wdr");
+; 0000 0286 //Parameter_bank[0]=0x11;
+; 0000 0287 //delay_ms(1000);
+; 0000 0288 
+; 0000 0289 //Parameter_bank[0]=0x11;
+; 0000 028A SPMCSR = 0x00;
+;PCODE: $00000433 VOL: 0
+;PCODE: $00000434 VOL: 0
+; 0000 028B delay_ms(100);
+;PCODE: $00000435 VOL: 0
+;PCODE: $00000436 VOL: 0
+;PCODE: $00000437 VOL: 0
+; 0000 028C 
+; 0000 028D //reset();
+; 0000 028E //APPLICATION();
+; 0000 028F //voidFuncPtr=(void(*)(void))0x0000;   //адресс куда переходим
+; 0000 0290 //voidFuncPtr();
+; 0000 0291 
+; 0000 0292 }
+;PCODE: $00000438 VOL: 0
+;PCODE: $00000439 VOL: 0
+;void main(void)
+; 0000 0294 {
+;PCODE: $0000043A VOL: 0
+; 0000 0295 // Declare your local variables here
+; 0000 0296 //int i=0,j=0;
+; 0000 0297 //int a = 0;
+; 0000 0298 system_init();
+;PCODE: $0000043B VOL: 0
+; 0000 0299 
+; 0000 029A //for(i =0; i<128; i++)
+; 0000 029B //PageBuffer[i]=i;
+; 0000 029C //BootLoad();
+; 0000 029D //SPMCSR = 0x00;
+; 0000 029E //#asm("wdr")
+; 0000 029F //
+; 0000 02A0 //for(i=0; i < 64;i++)
+; 0000 02A1 //{
+; 0000 02A2 //
+; 0000 02A3 //formTmpBuffer(i);
+; 0000 02A4 //
+; 0000 02A5 //}
+; 0000 02A6 //erasePageFromMemory(0x0000);
+; 0000 02A7 
+; 0000 02A8 //while (SPMCSR&1);
+; 0000 02A9 //writePageToMemory(0x0000);
+; 0000 02AA 
+; 0000 02AB 
+; 0000 02AC //sensor_address=Parameter_bank[14];
+; 0000 02AD //writePageToFlash();
+; 0000 02AE #asm("sei")
+;PCODE: $0000043C VOL: 0
+	sei
+;PCODE: $0000043D VOL: 0
+; 0000 02AF //#asm("wdr")
+; 0000 02B0         runApplication=Parameter_bank[0];
+;PCODE: $0000043E VOL: 0
+;PCODE: $0000043F VOL: 0
+;PCODE: $00000440 VOL: 1
+; 0000 02B1 //        Parameter_bank[0]++;
+; 0000 02B2         //runApplication=0x11;
+; 0000 02B3         RxEn;
+;PCODE: $00000441 VOL: 0
+;PCODE: $00000442 VOL: 0
+;PCODE: $00000443 VOL: 0
+;PCODE: $00000444 VOL: 0
+; 0000 02B4         Recieve;
+;PCODE: $00000445 VOL: 0
+;PCODE: $00000446 VOL: 0
+; 0000 02B5 //delay_ms(2000);
+; 0000 02B6 
+; 0000 02B7 
+; 0000 02B8 
+; 0000 02B9         while (1)
+;PCODE: $00000447 VOL: 0
+; 0000 02BA               {
+; 0000 02BB                 #asm("wdr")
+;PCODE: $00000448 VOL: 0
+	wdr
+;PCODE: $00000449 VOL: 0
+; 0000 02BC                 if(runApplication==0x11)//&(runApplication<0x15))
+;PCODE: $0000044A VOL: 1
+;PCODE: $0000044B VOL: 0
+;PCODE: $0000044C VOL: 0
+; 0000 02BD                     {
+; 0000 02BE                     delay_ms(10);
+;PCODE: $0000044D VOL: 0
+;PCODE: $0000044E VOL: 0
+;PCODE: $0000044F VOL: 0
+; 0000 02BF                     //executeLoadedCode();
+; 0000 02C0                     Parameter_bank[0]=0x11;
+;PCODE: $00000450 VOL: 0
+;PCODE: $00000451 VOL: 0
+;PCODE: $00000452 VOL: 0
+; 0000 02C1                     delay_ms(10);
+;PCODE: $00000453 VOL: 0
+;PCODE: $00000454 VOL: 0
+;PCODE: $00000455 VOL: 0
+; 0000 02C2                     #asm("sei");
+;PCODE: $00000456 VOL: 0
+	sei
+;PCODE: $00000457 VOL: 0
+; 0000 02C3                     MCUCR = 0x01;
+;PCODE: $00000458 VOL: 0
+;PCODE: $00000459 VOL: 0
+; 0000 02C4                     MCUCR = 0x00;
+;PCODE: $0000045A VOL: 0
+;PCODE: $0000045B VOL: 0
+; 0000 02C5                     reset();
+;PCODE: $0000045C VOL: 1
+;PCODE: $0000045D VOL: 0
+; 0000 02C6 //                   #asm
+; 0000 02C7 //                                  ldi r16, 0;\n\t"
+; 0000 02C8 //                                  push r16;\n\t"
+; 0000 02C9 //                                  ldi r16, 0;\n\t"
+; 0000 02CA //                                  push r16; \n\t"
+; 0000 02CB //                                  ret;   \n\t"
+; 0000 02CC //
+; 0000 02CD //                   #endasm
+; 0000 02CE //                    #asm ("jmp 0x0000");
+; 0000 02CF                     }
+; 0000 02D0                // if((runApplication>=0x15)&(runApplication<0xee))Parameter_bank[0]=0x00;
+; 0000 02D1                 if(runApplication>=0xee)
+;PCODE: $0000045E VOL: 0
+;PCODE: $0000045F VOL: 1
+;PCODE: $00000460 VOL: 0
+;PCODE: $00000461 VOL: 0
+; 0000 02D2                     {
+; 0000 02D3                     eraseApplicationSection();
+;PCODE: $00000462 VOL: 0
+; 0000 02D4 
+; 0000 02D5                     delay_ms(10);
+;PCODE: $00000463 VOL: 0
+;PCODE: $00000464 VOL: 0
+;PCODE: $00000465 VOL: 0
+; 0000 02D6                     Parameter_bank[0]=0x00;
+;PCODE: $00000466 VOL: 0
+;PCODE: $00000467 VOL: 0
+;PCODE: $00000468 VOL: 0
+; 0000 02D7                     Parameter_bank[2]=0xA3;
+;PCODE: $00000469 VOL: 0
+;PCODE: $0000046A VOL: 0
+;PCODE: $0000046B VOL: 0
+;PCODE: $0000046C VOL: 0
+; 0000 02D8                     }
+; 0000 02D9                // if(runApplication==0x01)Parameter_bank[0]=0x00;
+; 0000 02DA                 if(message_recieved)
+;PCODE: $0000046D VOL: 0
+;PCODE: $0000046E VOL: 0
+;PCODE: $0000046F VOL: 0
+;PCODE: $00000470 VOL: 0
+; 0000 02DB                 {
+; 0000 02DC                 transmit_HART();
+;PCODE: $00000471 VOL: 0
+; 0000 02DD                 }
+; 0000 02DE 
+; 0000 02DF               }
+;PCODE: $00000472 VOL: 0
+;PCODE: $00000473 VOL: 0
+;PCODE: $00000474 VOL: 0
+; 0000 02E0 }
+;PCODE: $00000475 VOL: 0
+;PCODE: $00000476 VOL: 0
+;PCODE: $00000477 VOL: 0
